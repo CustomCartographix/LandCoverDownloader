@@ -37,7 +37,6 @@ __copyright__ = '(C) 2026 by CustomCartographix'
 
 __revision__ = '$Format:%H$'
 
-
 # Import necessary modules
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
@@ -58,7 +57,6 @@ from tempfile import TemporaryDirectory
 from os import (chdir, path)
 from numpy import zeros
 from pandas import DataFrame
-
 
 from .land_cover_functions import *
 
@@ -147,7 +145,7 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterRasterDestination(
                 self.OUTPUT,
-                self.tr('LULC Raster')
+                self.tr('Land Cover Raster')
             )
         )
 
@@ -308,7 +306,7 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         str = """
         Downloads Sentinel-2 land cover data from Esri's Living Atlas based on user input latitude and longitude.
 
-        Input 'Latitude' and 'Longitude' in decimal degrees format.
+        Input 'Latitude' and 'Longitude' in decimal degrees format. Use +/- for N/S and E/W.
 
         'Search Radius' is input in meters (resulting area of interest (AOI) box will have a length and width 2x the search radius).
 
@@ -321,6 +319,9 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
 
     def shortDescription(self):
         return "Downloads Sentinel-2 land cover data using an input latitude/longitude point and a search radius"
+
+    def helpUrl(self):
+        return "https://github.com/CustomCartographix/LandCoverDownloader"
 
 
 class DownloadFromPoint(QgsProcessingAlgorithm):
@@ -393,7 +394,7 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterRasterDestination(
                 self.OUTPUT,
-                self.tr('LULC Raster')
+                self.tr('Land Cover Raster')
             )
         )
 
@@ -551,6 +552,9 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
     def shortDescription(self):
         return "Downloads Sentinel-2 land cover data using input point(s) and a search radius"
 
+    def helpUrl(self):
+        return "https://github.com/CustomCartographix/LandCoverDownloader"
+
 
 class DownloadFromAoi(QgsProcessingAlgorithm):
     """
@@ -602,7 +606,7 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterRasterDestination(
                 self.OUTPUT,
-                self.tr('LULC Raster')
+                self.tr('Land Cover Raster')
             )
         )
 
@@ -746,3 +750,6 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
 
     def shortDescription(self):
         return "Downloads Sentinel-2 land cover data using input AOI(s)"
+
+    def helpUrl(self):
+        return "https://github.com/CustomCartographix/LandCoverDownloader"
