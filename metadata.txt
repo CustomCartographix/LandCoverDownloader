@@ -1,0 +1,30 @@
+[general]
+name=Land Cover Downloader
+qgisMinimumVersion=3.0
+description=Downloads Sentinel-2 Land Cover Data from Esri's Living Atlas
+version=0.1
+author=CustomCartographix
+email=john@customcartographix.com
+
+about=Downloads Sentinel-2 land cover raster data from Esri's Living Atlas. It takes a point or area of interest and downloads the corresponding land cover data from the selected collection year.
+
+tracker=https://github.com/CustomCartographix/LandCoverDownloader/issues
+repository=https://github.com/CustomCartographix/LandCoverDownloader
+
+hasProcessingProvider=yes
+# changelog=
+
+tags=python, land cover, Sentinel-2
+
+homepage=https://customcartographix.com/
+category=Analysis
+icon=resources/land_cover_logo_svg.svg
+
+deprecated=False
+
+Category of the plugin: Raster, Vector, Database or Web
+# category=
+
+# If the plugin can run on QGIS Server.
+server=False
+
