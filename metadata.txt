@@ -2,7 +2,7 @@
 name=Land Cover Downloader
 qgisMinimumVersion=3.0
 description=Downloads Sentinel-2 Land Cover Data from Esri's Living Atlas
-version=0.1
+version=1.0.0
 author=CustomCartographix
 email=john@customcartographix.com
 
