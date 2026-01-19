@@ -16,7 +16,7 @@ hasProcessingProvider=yes
 
 tags=python, land cover, Sentinel-2
 
-homepage=https://customcartographix.com/
+homepage=https://github.com/CustomCartographix/LandCoverDownloader
 category=Analysis
 icon=resources/land_cover_logo_svg.svg
 
