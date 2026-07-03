@@ -7,15 +7,23 @@ in this file. The format is based on [Keep a Changelog](https://keepachangelog.c
 
 ### Fixed
 
+- **`numpy._core._exceptions._ArrayMemoryError` from `gdal:merge` on large,
+  multi-UTM-zone AOIs.**
+  `gdal_merge.py` allocated the entire output as an int64 numpy array, which
+  aborted on wide AOIs (dkrasne's case tried to allocate 47.7 GiB). The
+  clip-per-tile + `gdal:merge` sequence has been replaced with a single
+  `osgeo.gdal.Warp` call that mosaics, reprojects (multi-UTM input), and
+  clips to the AOI cutline in one streaming pass. Peak memory is now a few MB
+  regardless of AOI size. (Reported in the follow-up on
+  [issue #1](https://github.com/CustomCartographix/LandCoverDownloader/issues/1).)
 - **Output raster now renders with the Esri Living Atlas palette instead of grayscale.**
-  `gdal:merge` strips color tables when combining paletted tiles, and
-  `gdal:cliprasterbymasklayer` did not reliably preserve them either, so QGIS
-  fell back to Singleband Gray. A bundled QML style
-  (`resources/land_cover_style.qml`) covering the nine Esri classes (Water,
-  Trees, Flooded vegetation, Crops, Built area, Bare ground, Snow/Ice, Clouds,
-  Rangeland) is now applied to the output raster via a
-  `QgsProcessingLayerPostProcessorInterface` implementation, so the correct
-  symbology loads automatically for all three tools.
+  The new `gdal.Warp` pipeline preserves the source color table directly on
+  the output GeoTIFF (unlike `gdal:merge`, which stripped it). On top of that,
+  a bundled QML style (`resources/land_cover_style.qml`) covering the nine
+  Esri classes (Water, Trees, Flooded vegetation, Crops, Built area, Bare
+  ground, Snow/Ice, Clouds, Rangeland) is applied via a
+  `QgsProcessingLayerPostProcessorInterface` implementation so the layer also
+  loads with matching class labels in the QGIS legend.
 - **`DeprecationWarning: QgsVectorFileWriter.writeAsVectorFormat()` is deprecated.**
   Replaced with `writeAsVectorFormatV3()`, using a `SaveVectorOptions` object
   for driver, encoding, and `onlySelectedFeatures`. (Reported in
@@ -45,6 +53,14 @@ in this file. The format is based on [Keep a Changelog](https://keepachangelog.c
 
 ### Changed
 
+- **Mosaic/clip pipeline rewritten around `osgeo.gdal.Warp`.**
+  Replaces the old `gdal:cliprasterbymasklayer` (per tile) + `gdal:merge`
+  chain in `mosaicAndClipRasters`. The new implementation writes the AOI to a
+  temporary shapefile cutline, then does a single `gdal.Warp` pass over all
+  downloaded tiles with `resampleAlg='near'` (categorical data),
+  `cropToCutline=True`, and `dstSRS=` the AOI CRS. Output is LZW-compressed
+  tiled GeoTIFF. GDAL warp progress is forwarded to the Processing feedback
+  panel via a callback, and cancellation aborts the warp cleanly.
 - **Deduplicated the three algorithm classes.**
   The download / UTM-select / clip / mosaic sequence is now a single helper
   (`runLandCoverPipeline`) in `land_cover_functions.py`, called by all three

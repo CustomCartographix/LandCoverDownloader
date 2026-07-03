@@ -200,45 +200,92 @@ def runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
         return
 
     feedback.setProgressText('Clipping and Merging Land Cover Data...')
-    mosaicAndClipRasters(lc_return, aoi_layer, scratch_folder, output_lc_raster)
+    mosaicAndClipRasters(lc_return, aoi_layer, scratch_folder,
+                         output_lc_raster, feedback)
 
 
-def mosaicAndClipRasters(input_lc_filenames, aoi_layer, scratch_folder, output_lc_raster):
+def _writeAoiCutline(aoi_layer, scratch_folder):
     """
-    Function to mosaic and clip land cover rasters based on input AOI.
-
-    Writes output to processing algorithm output (i.e. temp file or file destination)
+    Write ``aoi_layer`` to an ESRI Shapefile in ``scratch_folder`` for use as
+    a ``gdalwarp`` cutline. Needed because gdal.Warp requires a data-source
+    path — a memory layer or already-loaded QgsVectorLayer won't do.
+    Returns the cutline shapefile path.
     """
+    cutline_path = path.join(scratch_folder, 'aoi_cutline.shp')
+    save_options = QgsVectorFileWriter.SaveVectorOptions()
+    save_options.driverName = 'ESRI Shapefile'
+    save_options.fileEncoding = 'utf-8'
+    QgsVectorFileWriter.writeAsVectorFormatV3(
+        aoi_layer,
+        cutline_path,
+        QgsProject.instance().transformContext(),
+        save_options)
+    return cutline_path
 
-    # Clip/mosaic lc data
-    # Slightly different methodology if greater than one tile (i.e. need to mosaic after clipping)
-    if len(input_lc_filenames) == 1:
-        input_lc = input_lc_filenames[0]
-        processing.run("gdal:cliprasterbymasklayer", {'INPUT': input_lc, 'MASK': aoi_layer,
-                                                      'SOURCE_CRS': None, 'TARGET_CRS': aoi_layer.crs().authid(),
-                                                      'TARGET_EXTENT': None,
-                                                      'NODATA': None, 'ALPHA_BAND': False,
-                                                      'CROP_TO_CUTLINE': True, 'KEEP_RESOLUTION': False,
-                                                      'SET_RESOLUTION': False, 'X_RESOLUTION': None,
-                                                      'Y_RESOLUTION': None, 'MULTITHREADING': False,
-                                                      'OPTIONS': '', 'DATA_TYPE': 0, 'EXTRA': '',
-                                                      'OUTPUT': output_lc_raster})
-    else:
-        clipped_rasters = []
-        for i in range(len(input_lc_filenames)):
-            temp_name = path.join(scratch_folder, 'clipped_lc_' + str(i) + '.tif')
-            clipped_rasters.append(temp_name)
-            processing.run("gdal:cliprasterbymasklayer",
-                           {'INPUT': input_lc_filenames[i], 'MASK': aoi_layer,
-                            'SOURCE_CRS': None, 'TARGET_CRS': aoi_layer.crs().authid(),
-                            'TARGET_EXTENT': None,
-                            'NODATA': None, 'ALPHA_BAND': False,
-                            'CROP_TO_CUTLINE': True, 'KEEP_RESOLUTION': False,
-                            'SET_RESOLUTION': False, 'X_RESOLUTION': None,
-                            'Y_RESOLUTION': None, 'MULTITHREADING': False,
-                            'OPTIONS': '', 'DATA_TYPE': 0, 'EXTRA': '',
-                            'OUTPUT': temp_name})
-        processing.run("gdal:merge", {'INPUT': clipped_rasters,
-                                      'PCT': False, 'SEPARATE': False, 'NODATA_INPUT': None, 'NODATA_OUTPUT': None,
-                                      'OPTIONS': '', 'EXTRA': '', 'DATA_TYPE': 0,
-                                      'OUTPUT': output_lc_raster})
+
+def _makeWarpProgressCallback(feedback):
+    """
+    Build a GDAL warp progress callback that forwards to a Processing
+    ``QgsProcessingFeedback`` and honors cancellation. Returning 0 from a
+    GDAL callback aborts the warp.
+    """
+    def _cb(complete, message, unknown):
+        if feedback is None:
+            return 1
+        if feedback.isCanceled():
+            return 0
+        feedback.setProgress(int(complete * 100))
+        return 1
+    return _cb
+
+
+def mosaicAndClipRasters(input_lc_filenames, aoi_layer, scratch_folder,
+                         output_lc_raster, feedback=None):
+    """
+    Mosaic, reproject, and clip all downloaded land cover tiles into a single
+    output raster using ``osgeo.gdal.Warp`` directly.
+
+    Why gdal.Warp instead of gdal:cliprasterbymasklayer + gdal:merge:
+
+    - **Memory.** ``gdal_merge.py`` (which backs ``gdal:merge``) allocates the
+      full output as an int64 numpy array. On a multi-UTM-zone AOI that can
+      run into tens of GiB and abort with ``ArrayMemoryError`` (see
+      https://github.com/CustomCartographix/LandCoverDownloader/issues/1).
+      ``gdalwarp`` streams block-by-block, so peak memory is a handful of MB
+      regardless of output extent.
+    - **Multi-CRS input.** Living Atlas tiles are stored in their native UTM
+      projections, which differ across zones. ``gdal.Warp`` accepts multiple
+      inputs in different CRSs and reprojects each to ``dstSRS`` in a single
+      pass. ``gdal:buildvirtualraster`` cannot.
+    - **Color table.** ``gdal.Warp`` preserves the source palette on Byte
+      rasters, so the paletted classes come through even without the QML
+      style being applied on top.
+    - **Fewer steps, fewer temp files.** No per-tile clipped intermediate.
+
+    Categorical class values require nearest-neighbour resampling; bilinear or
+    cubic would invent nonsense classes (e.g. 2.7).
+    """
+    # gdal is a QGIS dependency; deferring the import keeps plugin startup
+    # robust if the bindings are ever unavailable at load time.
+    from osgeo import gdal
+
+    cutline_path = _writeAoiCutline(aoi_layer, scratch_folder)
+
+    warp_options = gdal.WarpOptions(
+        format='GTiff',
+        dstSRS=aoi_layer.crs().authid(),
+        cutlineDSName=cutline_path,
+        cropToCutline=True,
+        resampleAlg='near',       # categorical data — do NOT change
+        multithread=False,
+        creationOptions=['COMPRESS=LZW', 'TILED=YES', 'PREDICTOR=2'],
+        callback=_makeWarpProgressCallback(feedback),
+    )
+
+    result = gdal.Warp(output_lc_raster, input_lc_filenames, options=warp_options)
+    if result is None:
+        raise QgsProcessingException(
+            'gdal.Warp failed to mosaic/clip land cover tiles into ' +
+            str(output_lc_raster))
+    # Close the dataset so the file is flushed to disk before QGIS opens it
+    result = None
