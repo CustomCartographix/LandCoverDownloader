@@ -30,24 +30,80 @@
 """
 
 # Import necessary modules
+from os import path
+
 from PyQt5.QtCore import QUrl
-from PyQt5.QtNetwork import QNetworkRequest
-from qgis._core import QgsNetworkAccessManager
+from PyQt5.QtNetwork import QNetworkRequest, QNetworkReply
+from qgis.core import (QgsNetworkAccessManager,
+                       QgsProcessingException,
+                       QgsProcessingLayerPostProcessorInterface,
+                       QgsProject,
+                       QgsVectorFileWriter,
+                       QgsVectorLayer)
 from qgis import processing
+
+
+# Bundled QML style applied to the output land cover raster so it renders
+# with the Esri Living Atlas palette instead of the default grayscale.
+LAND_COVER_STYLE_PATH = path.join(
+    path.dirname(__file__), 'resources', 'land_cover_style.qml')
+
+
+class SetLandCoverStylePostProcessor(QgsProcessingLayerPostProcessorInterface):
+    """
+    Processing post-processor that loads the bundled land cover QML style onto
+    the output raster once QGIS has added it to the project.
+
+    QGIS keeps only a weak reference to post-processors, so instances must be
+    held elsewhere (here, on the class itself) to survive past
+    ``processAlgorithm``.
+    """
+
+    _instance = None
+
+    def postProcessLayer(self, layer, context, feedback):
+        if layer is None or not layer.isValid():
+            return
+        result = layer.loadNamedStyle(LAND_COVER_STYLE_PATH)
+        # loadNamedStyle returns (message, success) on QGIS 3.x
+        if isinstance(result, tuple) and len(result) == 2 and not result[1]:
+            feedback.pushInfo(
+                'Could not apply land cover style: ' + str(result[0]))
+        layer.triggerRepaint()
+
+    @classmethod
+    def create(cls):
+        cls._instance = cls()
+        return cls._instance
+
+
+def loadUtmLayer():
+    """
+    Load the packaged World UTM Grid shapefile as a QgsVectorLayer.
+
+    Uses an absolute path derived from this file's location so callers don't
+    have to chdir() into the plugin directory.
+    """
+    utm_path = path.join(path.dirname(__file__), 'resources', 'World_UTM_Grid.shp')
+    return QgsVectorLayer(utm_path, 'World_UTM_Grid')
 
 
 def downloadLandCoverRaster(i, utm_zones, year, scratch_folder):
     """
-    Function to download land cover data based on current location
+    Download a single land cover tile for the UTM zone at ``utm_zones[i]``
+    for the given ``year`` and write it to ``scratch_folder``.
 
-    Returns filename of saved land cover raster
+    Returns the filename of the saved land cover raster. Raises
+    ``QgsProcessingException`` on network failure so the calling algorithm can
+    surface a clear error via the Processing feedback panel instead of
+    continuing with a corrupt file.
     """
 
     # Download data based on whichever UTM zone the aoi is within
     # Get UTM zone and create output filename
     zone = utm_zones[i]
     zone_id = str(zone[0]) + zone[1]
-    output_filename = scratch_folder + '/' + zone_id + ".tif"
+    output_filename = path.join(scratch_folder, zone_id + ".tif")
 
     # Get date range for URL
     if year == "2024":
@@ -57,20 +113,94 @@ def downloadLandCoverRaster(i, utm_zones, year, scratch_folder):
         next_year = year_int + 1
         date_range = year + "0101-" + str(next_year) + "0101"
 
-    # Download data from Living Atlas and write to scratch folder
+    # Download data from Living Atlas
     url = ("https://lulctimeseries.blob.core.windows.net/lulctimeseriesv003/lc" + year + "/" + zone_id +
            "_" + date_range + ".tif")
     qurl = QUrl(url)
     request = QNetworkRequest(qurl)
     network_access_manager = QgsNetworkAccessManager()
     response = network_access_manager.blockingGet(request)
+
+    # Surface network errors instead of writing garbage to disk
+    if response.error() != QNetworkReply.NoError:
+        raise QgsProcessingException(
+            "Failed to download land cover tile " + zone_id + " for " + year +
+            " (" + response.errorString() + "). URL: " + url)
+
     content = response.content()
-    open(output_filename, "wb").write(content)
+
+    # Write to scratch folder using a context manager so the writer is closed
+    # deterministically (fixes ResourceWarning: unclosed file).
+    with open(output_filename, "wb") as f:
+        f.write(content)
     temp_lc = open(output_filename, )
     temp_lc.close()
 
     # Return filename of downloaded land cover raster
     return output_filename
+
+
+def _selectUtmZonesForAoi(aoi_layer, utm_layer, scratch_folder):
+    """
+    Select UTM grid features intersecting ``aoi_layer``, write the selection to
+    ``scratch_folder`` as an ESRI Shapefile, then return the zones as a list of
+    ``[zone_number, zone_letter]`` pairs.
+    """
+
+    processing.run("native:selectbylocation",
+                   {'INPUT': utm_layer, 'PREDICATE': [0], 'INTERSECT': aoi_layer,
+                    'METHOD': 0})
+
+    selected_utm_path = path.join(scratch_folder, 'selected_utm.shp')
+
+    # Use writeAsVectorFormatV3 (V1 was deprecated in QGIS 3.10 and V2 in 3.20).
+    save_options = QgsVectorFileWriter.SaveVectorOptions()
+    save_options.driverName = 'ESRI Shapefile'
+    save_options.fileEncoding = 'utf-8'
+    save_options.onlySelectedFeatures = True
+    QgsVectorFileWriter.writeAsVectorFormatV3(
+        utm_layer,
+        selected_utm_path,
+        QgsProject.instance().transformContext(),
+        save_options)
+
+    temp_selection = QgsVectorLayer(selected_utm_path, 'temp_selection')
+    return [[feature[1], feature[2]] for feature in temp_selection.getFeatures()]
+
+
+def runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
+                         output_lc_raster, feedback):
+    """
+    Shared download / clip / mosaic pipeline used by all three algorithms.
+
+    Given an AOI layer already in the model coordinate system (EPSG:3857),
+    determine which Living Atlas tiles it intersects, download each tile into
+    ``scratch_folder``, then clip and mosaic them into ``output_lc_raster``.
+
+    Honors cancellation via ``feedback.isCanceled()`` between phases.
+    """
+
+    if feedback.isCanceled():
+        return
+    feedback.setProgressText('Downloading Land Cover Data...')
+
+    utm_layer = loadUtmLayer()
+    utm_zones = _selectUtmZonesForAoi(aoi_layer, utm_layer, scratch_folder)
+
+    lc_return = []
+    for i in range(len(utm_zones)):
+        if feedback.isCanceled():
+            return
+        feedback.setProgressText(
+            'Downloading LULC Data ' + str(i + 1) + '/' + str(len(utm_zones)) + '...')
+        lc_return.append(downloadLandCoverRaster(
+            i, utm_zones, year_string, scratch_folder))
+
+    if feedback.isCanceled():
+        return
+
+    feedback.setProgressText('Clipping and Merging Land Cover Data...')
+    mosaicAndClipRasters(lc_return, aoi_layer, scratch_folder, output_lc_raster)
 
 
 def mosaicAndClipRasters(input_lc_filenames, aoi_layer, scratch_folder, output_lc_raster):
@@ -96,7 +226,7 @@ def mosaicAndClipRasters(input_lc_filenames, aoi_layer, scratch_folder, output_l
     else:
         clipped_rasters = []
         for i in range(len(input_lc_filenames)):
-            temp_name = scratch_folder + '/clipped_lc_' + str(i) + '.tif'
+            temp_name = path.join(scratch_folder, 'clipped_lc_' + str(i) + '.tif')
             clipped_rasters.append(temp_name)
             processing.run("gdal:cliprasterbymasklayer",
                            {'INPUT': input_lc_filenames[i], 'MASK': aoi_layer,

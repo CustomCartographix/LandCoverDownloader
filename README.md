@@ -48,7 +48,7 @@ This tool downloads data based on a user-defined point (latitude/longitude) and 
 
 * ***Latitude*** and ***longitude*** values should be in decimal degrees (DDG) format using +/- to denote N/S or E/W.
 * ***Search Radius*** defines the radius of the generated AOI in meters.
-* ***Data Collection Year (2014-2017)*** defines the year the data represent (range: 2014-2024).
+* ***Data Collection Year (2017-2024)*** defines the year the data represent (range: 2017-2024).
 
 ### <img src="resources/point_icon_svg.svg" width="20"> Download Land Cover from Point
 
@@ -58,7 +58,7 @@ This tool downloads data based on a user-defined point (vector file) and search 
 
 * ***Input Point*** can be in any vector point format.
 * ***Search Radius*** defines the radius of the generated AOI in meters.
-* ***Data Collection Year (2014-2017)*** defines the year the data represent (range: 2014-2024).
+* ***Data Collection Year (2017-2024)*** defines the year the data represent (range: 2017-2024).
 
 ### <img src="resources/aoi_icon_svg.svg" width="20"> Download Land Cover from AOI
 
@@ -67,4 +67,4 @@ This tool downloads data based on a user-defined point (vector file) and search 
 This tool downloads data based on a user-defined AOI (vector file).
 
 * ***Input AOI*** can be in any vector polygon format.
-* ***Data Collection Year (2014-2017)*** defines the year the data represent (range: 2014-2024).
+* ***Data Collection Year (2017-2024)*** defines the year the data represent (range: 2017-2024).

@@ -38,11 +38,16 @@ __copyright__ = '(C) 2026 by CustomCartographix'
 __revision__ = '$Format:%H$'
 
 # Import necessary modules
+from os import path
+from tempfile import TemporaryDirectory
+
+from numpy import zeros
+from pandas import DataFrame
+
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis import processing
 from qgis.core import (QgsProcessing,
-                       QgsProcessingFeedback,
                        QgsProject,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterNumber,
@@ -51,34 +56,84 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterRasterDestination,
                        QgsProcessingParameterEnum,
                        QgsVectorLayer,
-                       QgsCoordinateReferenceSystem,
-                       QgsVectorFileWriter)
-from tempfile import TemporaryDirectory
-from os import (chdir, path)
-from numpy import zeros
-from pandas import DataFrame
+                       QgsCoordinateReferenceSystem)
 
-from .land_cover_functions import *
+from .land_cover_functions import (runLandCoverPipeline,
+                                    SetLandCoverStylePostProcessor)
 
 
-class DownloadFromLatLng(QgsProcessingAlgorithm):
+# Shared constants used by all three algorithms
+YEARLIST = ['2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024']
+MODEL_CRS = 'epsg:3857'
+
+
+class _LandCoverAlgorithmBase(QgsProcessingAlgorithm):
     """
-    LandCoverDownloader main processing algorithm
+    Base class providing the boilerplate shared by all three
+    Land Cover Downloader algorithms (translation, help URL, etc.).
+
+    Subclasses implement ``initAlgorithm``, ``processAlgorithm``, ``name``,
+    ``icon``, and ``shortHelpString`` / ``shortDescription``.
+    """
+
+    YEAR = "YEAR"
+    OUTPUT = "OUTPUT"
+
+    def displayName(self):
+        return self.tr(self.name())
+
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
+
+    def helpUrl(self):
+        return "https://github.com/CustomCartographix/LandCoverDownloader"
+
+    def _addYearParameter(self):
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.YEAR,
+                self.tr('Data Collection Year (2017-2024)'),
+                options=YEARLIST,
+                defaultValue=7
+            )
+        )
+
+    def _addOutputRasterParameter(self):
+        self.addParameter(
+            QgsProcessingParameterRasterDestination(
+                self.OUTPUT,
+                self.tr('Land Cover Raster')
+            )
+        )
+
+    def _resolveYear(self, parameters, context):
+        year_index = int(self.parameterAsString(parameters, self.YEAR, context))
+        return YEARLIST[year_index]
+
+    def _applyLandCoverStyleOnLoad(self, context, output):
+        """
+        Attach the land-cover QML post-processor to ``output`` so the raster is
+        rendered with the Esri Living Atlas palette when QGIS loads it. Safe
+        to call whether or not the layer is set to auto-load.
+        """
+        if context.willLoadLayerOnCompletion(output):
+            context.layerToLoadOnCompletionDetails(output).setPostProcessor(
+                SetLandCoverStylePostProcessor.create())
+
+
+class DownloadFromLatLng(_LandCoverAlgorithmBase):
+    """
+    LandCoverDownloader main processing algorithm.
+
+    Builds an AOI from a user-supplied latitude/longitude and search radius,
+    then delegates to the shared download/clip/mosaic pipeline.
     """
 
     # Constants
-
     LAT = "LAT"
     LNG = "LNG"
     SEARCHRADIUS = "SEARCHRADIUS"
-    YEAR = "YEAR"
-
-    OUTPUT = "OUTPUT"
     AOI = "AOI"
-
-    CODEFILENAME = 'land_cover_downloader_algorithm.py'
-
-    YEARLIST = ['2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024']
 
     def initAlgorithm(self, config):
         """
@@ -88,7 +143,6 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         # Save reference to project instance
         self.instance = QgsProject.instance()
 
-        # Add input and output parameters
         # Input LAT
         self.addParameter(
             QgsProcessingParameterNumber(
@@ -123,14 +177,7 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         )
 
         # Input year
-        self.addParameter(
-            QgsProcessingParameterEnum(
-                self.YEAR,
-                self.tr('Data Collection Year (2017-2024)'),
-                options=self.YEARLIST,
-                defaultValue=7
-            )
-        )
+        self._addYearParameter()
 
         # Output AOI
         self.addParameter(
@@ -142,12 +189,7 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         )
 
         # Output land cover raster
-        self.addParameter(
-            QgsProcessingParameterRasterDestination(
-                self.OUTPUT,
-                self.tr('Land Cover Raster')
-            )
-        )
+        self._addOutputRasterParameter()
 
     def processAlgorithm(self, parameters, context, feedback):
         """
@@ -158,122 +200,59 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         lat = self.parameterAsDouble(parameters, self.LAT, context)
         lng = self.parameterAsDouble(parameters, self.LNG, context)
         search_radius = self.parameterAsInt(parameters, self.SEARCHRADIUS, context)
-        year = int(self.parameterAsString(parameters, self.YEAR, context))
-        year_string = self.YEARLIST[year]
+        year_string = self._resolveYear(parameters, context)
 
         output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
         aoi = self.parameterAsOutputLayer(parameters, self.AOI, context)
 
-        """
-        ------------------------ Perform initial setup ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
         if feedback.isCanceled():
-            return
+            return {}
 
-        # Update progress
         feedback.setProgressText('Performing initial setup...')
 
-        # Get location of current file
-        current_path = __file__
-        file_directory = current_path.replace(self.CODEFILENAME, '')
-        chdir(file_directory)
+        model_coordinate_system = QgsCoordinateReferenceSystem(MODEL_CRS)
 
-        # Create layer of UTM grid (for finding land cover tiles)
-        utm_filename = 'resources/World_UTM_Grid.shp'
-        QgsVectorLayer(utm_filename, 'World_UTM_Grid')
-        utm_layer = QgsVectorLayer(utm_filename, 'World_UTM_Grid')
+        # Context-managed scratch dir so cleanup is deterministic (fixes the
+        # ResourceWarning: Implicitly cleaning up <TemporaryDirectory ...>).
+        with TemporaryDirectory() as scratch_folder:
 
-        # Create temporary directory for downloads/other data
-        temp_dir = TemporaryDirectory(delete=True, ignore_cleanup_errors=True)
-        scratch_folder = temp_dir.name
+            # Create point feature from lat/lng values via a temporary CSV.
+            coordinate_array = zeros((1, 3))
+            coordinate_array[0][0] = 1
+            coordinate_array[0][1] = lat
+            coordinate_array[0][2] = lng
+            df = DataFrame(coordinate_array, columns=['id', 'lat', 'lng'])
 
-        # Get project coordinate system and define model coordinate system
-        model_coordinate_system_name = 'epsg:3857'
-        model_coordinate_system = QgsCoordinateReferenceSystem(model_coordinate_system_name)
+            csv_path = path.join(scratch_folder, 'coordinate_table.csv')
+            with open(csv_path, "wb") as f:
+                df.to_csv(f, index=False)
 
-        # Create point feature from lat/lng values
-        # Export lat/lng values to table
-        coordinate_array = zeros((1, 3))
-        coordinate_array[0][0] = 1
-        coordinate_array[0][1] = lat
-        coordinate_array[0][2] = lng
-        df = DataFrame(coordinate_array, columns=['id', 'lat', 'lng'])
-
-        # Create and reproject POI layer
-        with open(scratch_folder + '/coordinate_table.csv', "wb") as f:
-            df.to_csv(f, index=False)
             poi_layer = processing.run("native:createpointslayerfromtable", {
-                'INPUT': scratch_folder + '\\coordinate_table.csv',
+                'INPUT': csv_path,
                 'XFIELD': 'lng', 'YFIELD': 'lat', 'ZFIELD': '', 'MFIELD': '',
                 'TARGET_CRS': QgsCoordinateReferenceSystem('EPSG:4326'),
                 'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
 
-        poi_projected_layer = processing.run("native:reprojectlayer", {'INPUT': poi_layer,
-                                                                       'TARGET_CRS': model_coordinate_system,
-                                                                       'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
+            poi_projected_layer = processing.run("native:reprojectlayer", {
+                'INPUT': poi_layer,
+                'TARGET_CRS': model_coordinate_system,
+                'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
 
-        # Generate AOI
-        processing.run("native:buffer", {'INPUT': poi_projected_layer, 'DISTANCE': search_radius,
-                                         'SEGMENTS': 5, 'END_CAP_STYLE': 2, 'JOIN_STYLE': 1,
-                                         'MITER_LIMIT': 2, 'DISSOLVE': False,
-                                         'OUTPUT': aoi})
+            # Generate AOI
+            processing.run("native:buffer", {'INPUT': poi_projected_layer, 'DISTANCE': search_radius,
+                                             'SEGMENTS': 5, 'END_CAP_STYLE': 2, 'JOIN_STYLE': 1,
+                                             'MITER_LIMIT': 2, 'DISSOLVE': False,
+                                             'OUTPUT': aoi})
 
-        aoi_layer = QgsVectorLayer(aoi, 'aoi_layer')
+            aoi_layer = QgsVectorLayer(aoi, 'aoi_layer')
 
-        """
-        ------------------------ Download Data ---------------------------------
-        """
+            # Shared download / clip / mosaic pipeline
+            runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
+                                 output, feedback)
 
-        # Stop the algorithm if cancel button has been clicked
-        if feedback.isCanceled():
-            return
+        # Apply the Esri land cover palette to the output raster on load
+        self._applyLandCoverStyleOnLoad(context, output)
 
-        # Update progress
-        feedback.setProgressText('Downloading Land Cover Data...')
-
-        # Select UTM zones that intersect input AOI
-        processing.run("native:selectbylocation",
-                       {'INPUT': utm_layer, 'PREDICATE': [0], 'INTERSECT': aoi_layer,
-                        'METHOD': 0})
-        QgsVectorFileWriter.writeAsVectorFormat(utm_layer,
-                                                scratch_folder + '/selected_utm.shp', 'utf-8',
-                                                driverName='ESRI Shapefile', onlySelected=True)
-        temp_selection = QgsVectorLayer(scratch_folder + '/selected_utm.shp', 'temp_selection')
-        temp_features = temp_selection.getFeatures()
-        utm_zones = []
-        for feature in temp_features:
-            utm_zones.append([feature[1], feature[2]])
-
-        # Download land cover data
-        # Variable for output land cover filenames
-        lc_return = []
-
-        # Download necessary land cover files
-        for i in range(len(utm_zones)):
-            # Stop the algorithm if cancel button has been clicked
-            if feedback.isCanceled():
-                break
-            feedback.setProgressText('Downloading LULC Data ' + str(i + 1) + '/' + str(len(utm_zones)))
-            temp_return = downloadLandCoverRaster(i, utm_zones, year_string, scratch_folder)
-            lc_return.append(temp_return)
-
-        """
-        ------------------------ Clip and Merge ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
-        if feedback.isCanceled():
-            return
-
-        # Update progress
-        feedback.setProgressText('Clipping and Merging Land Cover Data...')
-
-        # Merge and clip rasters
-        mosaicAndClipRasters(lc_return, aoi_layer, scratch_folder, output)
-
-        # Update progress
         feedback.setProgressText('...Complete!')
 
         return {
@@ -282,28 +261,16 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         }
 
     def name(self):
-        """
-        Returns the algorithm name, used for identifying the algorithm.
-        """
         return 'Download Land Cover from Lat/Lng'
-
-    def displayName(self):
-        """
-        Returns the translated algorithm name.
-        """
-        return self.tr(self.name())
-
-    def tr(self, string):
-        return QCoreApplication.translate('Processing', string)
 
     def createInstance(self):
         return DownloadFromLatLng()
 
     def icon(self):
-        return QIcon(path.dirname(__file__) + "/resources/lat_lng_icon_svg.svg")
+        return QIcon(path.join(path.dirname(__file__), 'resources', 'lat_lng_icon_svg.svg'))
 
     def shortHelpString(self):
-        str = """
+        return """
         Downloads Sentinel-2 land cover data from Esri's Living Atlas based on user input latitude and longitude.
 
         Input 'Latitude' and 'Longitude' in decimal degrees format. Use +/- for N/S and E/W.
@@ -315,32 +282,22 @@ class DownloadFromLatLng(QgsProcessingAlgorithm):
         The model will output the land cover raster clipped to the AOI, as well as the calculated AOI vector file.
         """
 
-        return str
-
     def shortDescription(self):
         return "Downloads Sentinel-2 land cover data using an input latitude/longitude point and a search radius"
 
-    def helpUrl(self):
-        return "https://github.com/CustomCartographix/LandCoverDownloader"
 
-
-class DownloadFromPoint(QgsProcessingAlgorithm):
+class DownloadFromPoint(_LandCoverAlgorithmBase):
     """
-    LandCoverDownloader main processing algorithm
+    LandCoverDownloader main processing algorithm.
+
+    Builds an AOI from a user-supplied point layer and search radius, then
+    delegates to the shared download/clip/mosaic pipeline.
     """
 
     # Constants
-
     POINT = "POINT"
     SEARCHRADIUS = "SEARCHRADIUS"
-    YEAR = "YEAR"
-
-    OUTPUT = "OUTPUT"
     AOI = "AOI"
-
-    CODEFILENAME = 'land_cover_downloader_algorithm.py'
-
-    YEARLIST = ['2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024']
 
     def initAlgorithm(self, config):
         """
@@ -350,7 +307,6 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         # Save reference to project instance
         self.instance = QgsProject.instance()
 
-        # Add input and output parameters
         # Input Point
         self.addParameter(
             QgsProcessingParameterFeatureSource(
@@ -372,14 +328,7 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         )
 
         # Input year
-        self.addParameter(
-            QgsProcessingParameterEnum(
-                self.YEAR,
-                self.tr('Data Collection Year (2017-2024)'),
-                options=self.YEARLIST,
-                defaultValue=7
-            )
-        )
+        self._addYearParameter()
 
         # Output AOI
         self.addParameter(
@@ -391,12 +340,7 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         )
 
         # Output land cover raster
-        self.addParameter(
-            QgsProcessingParameterRasterDestination(
-                self.OUTPUT,
-                self.tr('Land Cover Raster')
-            )
-        )
+        self._addOutputRasterParameter()
 
     def processAlgorithm(self, parameters, context, feedback):
         """
@@ -406,106 +350,41 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         # Assign inputs to variables
         point = self.parameterAsVectorLayer(parameters, self.POINT, context)
         search_radius = self.parameterAsInt(parameters, self.SEARCHRADIUS, context)
-        year = int(self.parameterAsString(parameters, self.YEAR, context))
-        year_string = self.YEARLIST[year]
+        year_string = self._resolveYear(parameters, context)
 
         output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
         aoi = self.parameterAsOutputLayer(parameters, self.AOI, context)
 
-        """
-        ------------------------ Perform initial setup ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
         if feedback.isCanceled():
-            return
+            return {}
 
-        # Update progress
         feedback.setProgressText('Performing initial setup...')
 
-        # Get location of current file
-        current_path = __file__
-        file_directory = current_path.replace(self.CODEFILENAME, '')
-        chdir(file_directory)
+        model_coordinate_system = QgsCoordinateReferenceSystem(MODEL_CRS)
 
-        # Create layer of UTM grid (for finding land cover tiles)
-        utm_filename = 'resources/World_UTM_Grid.shp'
-        QgsVectorLayer(utm_filename, 'World_UTM_Grid')
-        utm_layer = QgsVectorLayer(utm_filename, 'World_UTM_Grid')
+        with TemporaryDirectory() as scratch_folder:
 
-        # Create temporary directory for downloads/other data
-        temp_dir = TemporaryDirectory(delete=True, ignore_cleanup_errors=True)
-        scratch_folder = temp_dir.name
+            # Reproject point layer
+            poi_projected_layer = processing.run("native:reprojectlayer", {
+                'INPUT': point,
+                'TARGET_CRS': model_coordinate_system,
+                'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
 
-        # Get project coordinate system and define model coordinate system
-        model_coordinate_system_name = 'epsg:3857'
-        model_coordinate_system = QgsCoordinateReferenceSystem(model_coordinate_system_name)
+            # Generate AOI
+            processing.run("native:buffer", {'INPUT': poi_projected_layer, 'DISTANCE': search_radius,
+                                             'SEGMENTS': 5, 'END_CAP_STYLE': 2, 'JOIN_STYLE': 1,
+                                             'MITER_LIMIT': 2, 'DISSOLVE': False,
+                                             'OUTPUT': aoi})
 
-        # Reproject point layer
-        poi_projected_layer = processing.run("native:reprojectlayer", {'INPUT': point,
-                                                                       'TARGET_CRS': model_coordinate_system,
-                                                                       'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
+            aoi_layer = QgsVectorLayer(aoi, 'aoi_layer')
 
-        # Generate AOI
-        processing.run("native:buffer", {'INPUT': poi_projected_layer, 'DISTANCE': search_radius,
-                                         'SEGMENTS': 5, 'END_CAP_STYLE': 2, 'JOIN_STYLE': 1,
-                                         'MITER_LIMIT': 2, 'DISSOLVE': False,
-                                         'OUTPUT': aoi})
+            # Shared download / clip / mosaic pipeline
+            runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
+                                 output, feedback)
 
-        aoi_layer = QgsVectorLayer(aoi, 'aoi_layer')
+        # Apply the Esri land cover palette to the output raster on load
+        self._applyLandCoverStyleOnLoad(context, output)
 
-        """
-        ------------------------ Download Data ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
-        if feedback.isCanceled():
-            return
-
-        # Update progress
-        feedback.setProgressText('Downloading Land Cover Data...')
-
-        # Select UTM zones that intersect input AOI
-        processing.run("native:selectbylocation",
-                       {'INPUT': utm_layer, 'PREDICATE': [0], 'INTERSECT': aoi_layer,
-                        'METHOD': 0})
-        QgsVectorFileWriter.writeAsVectorFormat(utm_layer,
-                                                scratch_folder + '/selected_utm.shp', 'utf-8',
-                                                driverName='ESRI Shapefile', onlySelected=True)
-        temp_selection = QgsVectorLayer(scratch_folder + '/selected_utm.shp', 'temp_selection')
-        temp_features = temp_selection.getFeatures()
-        utm_zones = []
-        for feature in temp_features:
-            utm_zones.append([feature[1], feature[2]])
-
-        # Download land cover data
-        # Variable for output land cover filenames
-        lc_return = []
-
-        # Download necessary land cover files
-        for i in range(len(utm_zones)):
-            # Stop the algorithm if cancel button has been clicked
-            if feedback.isCanceled():
-                break
-            feedback.setProgressText('Downloading LULC Data ' + str(i + 1) + '/' + str(len(utm_zones)))
-            temp_return = downloadLandCoverRaster(i, utm_zones, year_string, scratch_folder)
-            lc_return.append(temp_return)
-
-        """
-        ------------------------ Clip and Merge ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
-        if feedback.isCanceled():
-            return
-
-        # Update progress
-        feedback.setProgressText('Clipping and Merging Land Cover Data...')
-
-        # Merge and clip rasters
-        mosaicAndClipRasters(lc_return, aoi_layer, scratch_folder, output)
-
-        # Update progress
         feedback.setProgressText('...Complete!')
 
         return {
@@ -514,28 +393,16 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         }
 
     def name(self):
-        """
-        Returns the algorithm name, used for identifying the algorithm.
-        """
         return 'Download Land Cover from Point'
-
-    def displayName(self):
-        """
-        Returns the translated algorithm name.
-        """
-        return self.tr(self.name())
-
-    def tr(self, string):
-        return QCoreApplication.translate('Processing', string)
 
     def createInstance(self):
         return DownloadFromPoint()
 
     def icon(self):
-        return QIcon(path.dirname(__file__) + "/resources/point_icon_svg.svg")
+        return QIcon(path.join(path.dirname(__file__), 'resources', 'point_icon_svg.svg'))
 
     def shortHelpString(self):
-        str = """
+        return """
         Downloads Sentinel-2 land cover data from Esri's Living Atlas based on user input point.
 
         'Input Point' is a vector point file (can contain multiple features).
@@ -547,32 +414,20 @@ class DownloadFromPoint(QgsProcessingAlgorithm):
         The model will output the land cover raster clipped to the AOI(s), as well as the calculated AOI vector file.
         """
 
-        return str
-
     def shortDescription(self):
         return "Downloads Sentinel-2 land cover data using input point(s) and a search radius"
 
-    def helpUrl(self):
-        return "https://github.com/CustomCartographix/LandCoverDownloader"
 
-
-class DownloadFromAoi(QgsProcessingAlgorithm):
+class DownloadFromAoi(_LandCoverAlgorithmBase):
     """
     LandCoverDownloader main processing algorithm.
 
-    Download data from AOI input.
+    Uses a user-supplied AOI polygon layer directly and delegates to the
+    shared download/clip/mosaic pipeline.
     """
 
     # Constants
-
     AOI = "AOI"
-    YEAR = "YEAR"
-
-    OUTPUT = "OUTPUT"
-
-    CODEFILENAME = 'land_cover_downloader_algorithm.py'
-
-    YEARLIST = ['2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024']
 
     def initAlgorithm(self, config):
         """
@@ -582,8 +437,7 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
         # Save reference to project instance
         self.instance = QgsProject.instance()
 
-        # Add input and output parameters
-        # Input Point
+        # Input AOI
         self.addParameter(
             QgsProcessingParameterFeatureSource(
                 self.AOI,
@@ -593,22 +447,10 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
         )
 
         # Input year
-        self.addParameter(
-            QgsProcessingParameterEnum(
-                self.YEAR,
-                self.tr('Data Collection Year (2017-2024)'),
-                options=self.YEARLIST,
-                defaultValue=7
-            )
-        )
+        self._addYearParameter()
 
         # Output land cover raster
-        self.addParameter(
-            QgsProcessingParameterRasterDestination(
-                self.OUTPUT,
-                self.tr('Land Cover Raster')
-            )
-        )
+        self._addOutputRasterParameter()
 
     def processAlgorithm(self, parameters, context, feedback):
         """
@@ -617,97 +459,32 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
 
         # Assign inputs to variables
         aoi = self.parameterAsVectorLayer(parameters, self.AOI, context)
-        year = int(self.parameterAsString(parameters, self.YEAR, context))
-        year_string = self.YEARLIST[year]
+        year_string = self._resolveYear(parameters, context)
 
         output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
 
-        """
-        ------------------------ Perform initial setup ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
         if feedback.isCanceled():
-            return
+            return {}
 
-        # Update progress
         feedback.setProgressText('Performing initial setup...')
 
-        # Get location of current file
-        current_path = __file__
-        file_directory = current_path.replace(self.CODEFILENAME, '')
-        chdir(file_directory)
+        model_coordinate_system = QgsCoordinateReferenceSystem(MODEL_CRS)
 
-        # Create layer of UTM grid (for finding land cover tiles)
-        utm_filename = 'resources/World_UTM_Grid.shp'
-        QgsVectorLayer(utm_filename, 'World_UTM_Grid')
-        utm_layer = QgsVectorLayer(utm_filename, 'World_UTM_Grid')
+        with TemporaryDirectory() as scratch_folder:
 
-        # Create temporary directory for downloads/other data
-        temp_dir = TemporaryDirectory(delete=True, ignore_cleanup_errors=True)
-        scratch_folder = temp_dir.name
+            # Reproject aoi layer
+            aoi_layer = processing.run("native:reprojectlayer", {
+                'INPUT': aoi,
+                'TARGET_CRS': model_coordinate_system,
+                'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
 
-        # Get project coordinate system and define model coordinate system
-        model_coordinate_system_name = 'epsg:3857'
-        model_coordinate_system = QgsCoordinateReferenceSystem(model_coordinate_system_name)
+            # Shared download / clip / mosaic pipeline
+            runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
+                                 output, feedback)
 
-        # Reproject aoi layer
-        aoi_layer = processing.run("native:reprojectlayer", {'INPUT': aoi,
-                                                             'TARGET_CRS': model_coordinate_system,
-                                                             'OUTPUT': 'TEMPORARY_OUTPUT'})['OUTPUT']
+        # Apply the Esri land cover palette to the output raster on load
+        self._applyLandCoverStyleOnLoad(context, output)
 
-        """
-        ------------------------ Download Data ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
-        if feedback.isCanceled():
-            return
-
-        # Update progress
-        feedback.setProgressText('Downloading Land Cover Data...')
-
-        # Select UTM zones that intersect input AOI
-        processing.run("native:selectbylocation",
-                       {'INPUT': utm_layer, 'PREDICATE': [0], 'INTERSECT': aoi_layer,
-                        'METHOD': 0})
-        QgsVectorFileWriter.writeAsVectorFormat(utm_layer,
-                                                scratch_folder + '/selected_utm.shp', 'utf-8',
-                                                driverName='ESRI Shapefile', onlySelected=True)
-        temp_selection = QgsVectorLayer(scratch_folder + '/selected_utm.shp', 'temp_selection')
-        temp_features = temp_selection.getFeatures()
-        utm_zones = []
-        for feature in temp_features:
-            utm_zones.append([feature[1], feature[2]])
-
-        # Download land cover data
-        # Variable for output land cover filenames
-        lc_return = []
-
-        # Download necessary land cover files
-        for i in range(len(utm_zones)):
-            # Stop the algorithm if cancel button has been clicked
-            if feedback.isCanceled():
-                break
-            feedback.setProgressText('Downloading LULC Data ' + str(i + 1) + '/' + str(len(utm_zones)) + "...")
-            temp_return = downloadLandCoverRaster(i, utm_zones, year_string, scratch_folder)
-            lc_return.append(temp_return)
-
-        """
-        ------------------------ Clip and Merge ---------------------------------
-        """
-
-        # Stop the algorithm if cancel button has been clicked
-        if feedback.isCanceled():
-            return
-
-        # Update progress
-        feedback.setProgressText('Clipping and Merging Land Cover Data...')
-
-        # Merge and clip rasters
-        mosaicAndClipRasters(lc_return, aoi_layer, scratch_folder, output)
-
-        # Update progress
         feedback.setProgressText('...Complete!')
 
         return {
@@ -715,28 +492,16 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
         }
 
     def name(self):
-        """
-        Returns the algorithm name, used for identifying the algorithm.
-        """
         return 'Download Land Cover from AOI'
-
-    def displayName(self):
-        """
-        Returns the translated algorithm name.
-        """
-        return self.tr(self.name())
-
-    def tr(self, string):
-        return QCoreApplication.translate('Processing', string)
 
     def createInstance(self):
         return DownloadFromAoi()
 
     def icon(self):
-        return QIcon(path.dirname(__file__) + "/resources/aoi_icon_svg.svg")
+        return QIcon(path.join(path.dirname(__file__), 'resources', 'aoi_icon_svg.svg'))
 
     def shortHelpString(self):
-        str = """
+        return """
         Downloads Sentinel-2 land cover data from Esri's Living Atlas based on user input area of interest (AOI).
 
         'Input AOI' is a vector polygon file (can contain multiple features).
@@ -746,10 +511,5 @@ class DownloadFromAoi(QgsProcessingAlgorithm):
         The model will output the land cover raster clipped to the AOI(s).
         """
 
-        return str
-
     def shortDescription(self):
         return "Downloads Sentinel-2 land cover data using input AOI(s)"
-
-    def helpUrl(self):
-        return "https://github.com/CustomCartographix/LandCoverDownloader"
