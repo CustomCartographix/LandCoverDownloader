@@ -75,9 +75,16 @@ in this file. The format is based on [Keep a Changelog](https://keepachangelog.c
 
 - `resources/land_cover_style.qml` — QGIS QML style for the Esri Sentinel-2
   Land Use/Land Cover palette.
-- `SetLandCoverStylePostProcessor` in `land_cover_functions.py` —
-  post-processor that applies the bundled style when the output raster loads
-  into the project.
+- `resources/aoi_outline_style.qml` — polygon style for the generated AOI:
+  solid red outline (0.6 mm) with no fill. Applied automatically to the AOI
+  vector output of the Lat/Lng and Point tools (the AOI tool takes an AOI
+  as input and produces no AOI output).
+- Post-processors in `land_cover_functions.py` that apply the bundled styles
+  when the output layers load into the project:
+  `SetLandCoverStylePostProcessor` (for the raster) and
+  `SetAoiOutlineStylePostProcessor` (for the AOI). Both subclass a shared
+  `_StyleFromQmlPostProcessor` base so the load-and-repaint logic lives in
+  one place.
 - Docstrings on all shared helpers in `land_cover_functions.py`.
 
 ## [1.0.0] - 2026-01-11

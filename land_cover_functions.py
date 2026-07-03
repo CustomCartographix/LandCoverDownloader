@@ -43,38 +43,58 @@ from qgis.core import (QgsNetworkAccessManager,
 from qgis import processing
 
 
-# Bundled QML style applied to the output land cover raster so it renders
-# with the Esri Living Atlas palette instead of the default grayscale.
+# Bundled QML styles applied to the algorithm outputs.
+#   * Land cover raster → Esri Living Atlas paletted style.
+#   * AOI polygon        → red outline, no fill.
 LAND_COVER_STYLE_PATH = path.join(
     path.dirname(__file__), 'resources', 'land_cover_style.qml')
+AOI_OUTLINE_STYLE_PATH = path.join(
+    path.dirname(__file__), 'resources', 'aoi_outline_style.qml')
 
 
-class SetLandCoverStylePostProcessor(QgsProcessingLayerPostProcessorInterface):
+class _StyleFromQmlPostProcessor(QgsProcessingLayerPostProcessorInterface):
     """
-    Processing post-processor that loads the bundled land cover QML style onto
-    the output raster once QGIS has added it to the project.
+    Base Processing post-processor that loads a bundled QML style onto a layer
+    once QGIS has added it to the project.
+
+    Subclasses set ``STYLE_PATH`` (an absolute path to a ``.qml`` file) and
+    optionally override ``STYLE_LABEL`` for user-facing messages.
 
     QGIS keeps only a weak reference to post-processors, so instances must be
-    held elsewhere (here, on the class itself) to survive past
-    ``processAlgorithm``.
+    held elsewhere. Each subclass caches its own instance on ``_instance``
+    (attribute lookup on ``cls`` shadows the base's ``None``).
     """
 
+    STYLE_PATH = None
+    STYLE_LABEL = 'style'
     _instance = None
 
     def postProcessLayer(self, layer, context, feedback):
-        if layer is None or not layer.isValid():
+        if layer is None or not layer.isValid() or self.STYLE_PATH is None:
             return
-        result = layer.loadNamedStyle(LAND_COVER_STYLE_PATH)
+        result = layer.loadNamedStyle(self.STYLE_PATH)
         # loadNamedStyle returns (message, success) on QGIS 3.x
         if isinstance(result, tuple) and len(result) == 2 and not result[1]:
             feedback.pushInfo(
-                'Could not apply land cover style: ' + str(result[0]))
+                'Could not apply ' + self.STYLE_LABEL + ': ' + str(result[0]))
         layer.triggerRepaint()
 
     @classmethod
     def create(cls):
         cls._instance = cls()
         return cls._instance
+
+
+class SetLandCoverStylePostProcessor(_StyleFromQmlPostProcessor):
+    """Applies the Esri Living Atlas paletted raster style to the output raster."""
+    STYLE_PATH = LAND_COVER_STYLE_PATH
+    STYLE_LABEL = 'land cover style'
+
+
+class SetAoiOutlineStylePostProcessor(_StyleFromQmlPostProcessor):
+    """Applies the red-outline / no-fill polygon style to the generated AOI."""
+    STYLE_PATH = AOI_OUTLINE_STYLE_PATH
+    STYLE_LABEL = 'AOI outline style'
 
 
 def loadUtmLayer():

@@ -59,7 +59,8 @@ from qgis.core import (QgsProcessing,
                        QgsCoordinateReferenceSystem)
 
 from .land_cover_functions import (runLandCoverPipeline,
-                                    SetLandCoverStylePostProcessor)
+                                    SetLandCoverStylePostProcessor,
+                                    SetAoiOutlineStylePostProcessor)
 
 
 # Shared constants used by all three algorithms
@@ -110,15 +111,23 @@ class _LandCoverAlgorithmBase(QgsProcessingAlgorithm):
         year_index = int(self.parameterAsString(parameters, self.YEAR, context))
         return YEARLIST[year_index]
 
+    def _applyStyleOnLoad(self, context, layer_output, post_processor_cls):
+        """
+        Attach ``post_processor_cls`` to ``layer_output`` so its bundled QML
+        style is applied when QGIS loads the layer. Safe to call whether or
+        not the layer is set to auto-load.
+        """
+        if context.willLoadLayerOnCompletion(layer_output):
+            context.layerToLoadOnCompletionDetails(layer_output).setPostProcessor(
+                post_processor_cls.create())
+
     def _applyLandCoverStyleOnLoad(self, context, output):
-        """
-        Attach the land-cover QML post-processor to ``output`` so the raster is
-        rendered with the Esri Living Atlas palette when QGIS loads it. Safe
-        to call whether or not the layer is set to auto-load.
-        """
-        if context.willLoadLayerOnCompletion(output):
-            context.layerToLoadOnCompletionDetails(output).setPostProcessor(
-                SetLandCoverStylePostProcessor.create())
+        """Apply the Esri Living Atlas palette to the output raster on load."""
+        self._applyStyleOnLoad(context, output, SetLandCoverStylePostProcessor)
+
+    def _applyAoiOutlineStyleOnLoad(self, context, aoi):
+        """Apply the red-outline / no-fill polygon style to the AOI on load."""
+        self._applyStyleOnLoad(context, aoi, SetAoiOutlineStylePostProcessor)
 
 
 class DownloadFromLatLng(_LandCoverAlgorithmBase):
@@ -250,8 +259,10 @@ class DownloadFromLatLng(_LandCoverAlgorithmBase):
             runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
                                  output, feedback)
 
-        # Apply the Esri land cover palette to the output raster on load
+        # Apply the Esri land cover palette to the output raster and the
+        # red-outline style to the generated AOI polygon on load.
         self._applyLandCoverStyleOnLoad(context, output)
+        self._applyAoiOutlineStyleOnLoad(context, aoi)
 
         feedback.setProgressText('...Complete!')
 
@@ -382,8 +393,10 @@ class DownloadFromPoint(_LandCoverAlgorithmBase):
             runLandCoverPipeline(aoi_layer, year_string, scratch_folder,
                                  output, feedback)
 
-        # Apply the Esri land cover palette to the output raster on load
+        # Apply the Esri land cover palette to the output raster and the
+        # red-outline style to the generated AOI polygon on load.
         self._applyLandCoverStyleOnLoad(context, output)
+        self._applyAoiOutlineStyleOnLoad(context, aoi)
 
         feedback.setProgressText('...Complete!')
 
