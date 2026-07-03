@@ -64,16 +64,6 @@ in this file. The format is based on [Keep a Changelog](https://keepachangelog.c
   into the project.
 - Docstrings on all shared helpers in `land_cover_functions.py`.
 
-### Known issues (not addressed in this release)
-
-- **`numpy._core._exceptions._ArrayMemoryError` from `gdal:merge` on large,
-  multi-UTM-zone AOIs** (from the follow-up in
-  [issue #1](https://github.com/CustomCartographix/LandCoverDownloader/issues/1)).
-  `gdal_merge.py` allocates the full output as an int64 array, which fails on
-  wide AOIs. Fixing this properly means replacing the clip-then-merge sequence
-  with a `gdal:buildvirtualraster` (VRT) + single-clip pipeline that streams
-  instead of allocating the output in memory. Planned for a future release.
-
 ## [1.0.0] - 2026-01-11
 
 ### Added
