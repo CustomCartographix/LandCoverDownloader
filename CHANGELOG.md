@@ -3,6 +3,25 @@
 All notable changes to the Land Cover Downloader QGIS plugin are documented
 in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.2] - 2026-07-03
+
+### Added
+
+- **Support for 2025 land cover data.** `YEARLIST` now runs 2017–2025 and
+  the "Data Collection Year" enum defaults to the newest year. Esri released
+  the 2025 tiles in April 2026 (confirmed via
+  [Esri Community thread](https://community.esri.com/t5/arcgis-living-atlas-questions/2025-update-on-sentinel-2-10m-land-use-land-cover/td-p/1696377)),
+  using the same year-end-inclusive naming as 2024
+  (`lc2025/{zone}_20250101-20251231.tif`). `downloadLandCoverRaster` was
+  generalized to apply the new naming convention for any year ≥ 2024, so
+  future years should Just Work if Esri keeps the same convention.
+
+### Changed
+
+- Default `defaultValue` on the year enum is now computed as
+  `len(YEARLIST) - 1` rather than a hardcoded index, so it auto-tracks the
+  newest entry.
+
 ## [1.0.1] - 2026-07-03
 
 ### Fixed

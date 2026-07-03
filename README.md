@@ -18,7 +18,7 @@ The basic structure of ***Land Cover Downloader*** is discussed below, to includ
   * AOI(s) - A vector polygon file.  File can have multiple features.
 
 
- * ***Data Year -*** What year the data represent. Currently, Esri has published data from 2017-2024.
+ * ***Data Year -*** What year the data represent. Currently, Esri has published data from 2017-2025.
 
 ### Outputs
 
@@ -48,7 +48,7 @@ This tool downloads data based on a user-defined point (latitude/longitude) and 
 
 * ***Latitude*** and ***longitude*** values should be in decimal degrees (DDG) format using +/- to denote N/S or E/W.
 * ***Search Radius*** defines the radius of the generated AOI in meters.
-* ***Data Collection Year (2017-2024)*** defines the year the data represent (range: 2017-2024).
+* ***Data Collection Year (2017-2025)*** defines the year the data represent (range: 2017-2025).
 
 ### <img src="resources/point_icon_svg.svg" width="20"> Download Land Cover from Point
 
@@ -58,7 +58,7 @@ This tool downloads data based on a user-defined point (vector file) and search 
 
 * ***Input Point*** can be in any vector point format.
 * ***Search Radius*** defines the radius of the generated AOI in meters.
-* ***Data Collection Year (2017-2024)*** defines the year the data represent (range: 2017-2024).
+* ***Data Collection Year (2017-2025)*** defines the year the data represent (range: 2017-2025).
 
 ### <img src="resources/aoi_icon_svg.svg" width="20"> Download Land Cover from AOI
 
@@ -67,4 +67,4 @@ This tool downloads data based on a user-defined point (vector file) and search 
 This tool downloads data based on a user-defined AOI (vector file).
 
 * ***Input AOI*** can be in any vector polygon format.
-* ***Data Collection Year (2017-2024)*** defines the year the data represent (range: 2017-2024).
+* ***Data Collection Year (2017-2025)*** defines the year the data represent (range: 2017-2025).

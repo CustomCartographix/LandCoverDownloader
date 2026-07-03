@@ -64,7 +64,7 @@ from .land_cover_functions import (runLandCoverPipeline,
 
 
 # Shared constants used by all three algorithms
-YEARLIST = ['2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024']
+YEARLIST = ['2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024', '2025']
 MODEL_CRS = 'epsg:3857'
 
 
@@ -93,9 +93,9 @@ class _LandCoverAlgorithmBase(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterEnum(
                 self.YEAR,
-                self.tr('Data Collection Year (2017-2024)'),
+                self.tr('Data Collection Year (2017-2025)'),
                 options=YEARLIST,
-                defaultValue=7
+                defaultValue=len(YEARLIST) - 1
             )
         )
 

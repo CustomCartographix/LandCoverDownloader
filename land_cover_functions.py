@@ -125,11 +125,13 @@ def downloadLandCoverRaster(i, utm_zones, year, scratch_folder):
     zone_id = str(zone[0]) + zone[1]
     output_filename = path.join(scratch_folder, zone_id + ".tif")
 
-    # Get date range for URL
-    if year == "2024":
-        date_range = "20240101-20241231"
+    # Get date range for URL. Esri changed the file-naming convention starting
+    # with the 2024 data: from "{year}0101-{year+1}0101" (calendar span) to
+    # "{year}0101-{year}1231" (year-end inclusive). Handle both.
+    year_int = int(year)
+    if year_int >= 2024:
+        date_range = year + "0101-" + year + "1231"
     else:
-        year_int = int(year)
         next_year = year_int + 1
         date_range = year + "0101-" + str(next_year) + "0101"
 
